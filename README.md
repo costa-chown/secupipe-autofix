@@ -7,6 +7,16 @@ betroffenen Pakete auf die gefixte Version, lässt Build und Tests laufen und ö
 **Alles läuft auf deinem Runner.** Secupipe bekommt keinen Quellcode, nur Status, PR-Link und das Ende des
 Protokolls. Den Schlüssel für den KI-Agenten hinterlegst du selbst. Gemergt wird nie automatisch.
 
+## Modus (Einstellungen in Secupipe)
+
+| Modus | Was passiert |
+|---|---|
+| Nur Versions-Update | Update, Build und Tests; bei Fehlern PR-Entwurf mit Protokoll. Ohne KI. |
+| Update, KI bei Fehlern (Standard) | Wie oben; bricht das Update etwas, passt der KI-Agent den Code an. |
+| KI-Agent zuerst | Der Agent prüft jeden Auftrag: Nutzung des Pakets, Erreichbarkeit der Lücke, Code-Anpassung, Zusammenfassung im PR. Ist das Update nicht sinnvoll machbar und die Lücke nicht erreichbar, meldet er »nicht betroffen« als VEX-Vorschlag; gültig erst nach Freigabe in Secupipe. |
+
+Die KI-Stufen brauchen das Modul KI und einen eigenen Schlüssel in der Pipeline.
+
 ## Ablauf
 
 1. In Secupipe beim Befund **Fix-PR erstellen** klicken, oder `AUTO=hoch` setzen: dann legt der Job selbst

@@ -18,7 +18,8 @@
 #   BASE_BRANCH        Zielbranch der PRs, Standard der ausgecheckte Branch
 #   DRY_RUN=1          nichts pushen und keinen PR öffnen (Test)
 #   KI-Agent (nur mit Modul KI): ANTHROPIC_API_KEY oder CLAUDE_CODE_USE_BEDROCK/CLAUDE_CODE_USE_VERTEX
-#   KI_MODEL, KI_MAX_TURNS (40), KI_BUDGET_USD (5)
+#   KI_MODEL, KI_MAX_TURNS (40, im Modus agent 60), KI_BUDGET_USD (5)
+#   Der Modus (update, update_ki, agent) kommt aus den Einstellungen in Secupipe.
 set -euo pipefail
 
 API=${SECUPIPE_API:-https://api.secupipe.com/v1}
@@ -259,6 +260,55 @@ EOF
   cat "$WORK/ki.txt"
 }
 
+# ki_agent: Modus »KI-Agent zuerst«. Der Agent bekommt das bereits versuchte Update und dessen Prüfergebnis,
+# prüft, ob die Lücke im Code überhaupt erreichbar ist, passt den Code an und schreibt sein Ergebnis nach
+# .secupipe-ergebnis.json: {"ergebnis": "fix" | "nicht_betroffen", "justification", "begruendung", "konfidenz"}.
+ERGEBNIS=.secupipe-ergebnis.json
+ki_agent() { # name, alt, neu, cves, gruppe-json, update-status (gruen|rot|keins)
+  info "KI-Agent arbeitet zuerst ($1 $2 → $3, Update: $6)"
+  local prompt befunde fehler=""
+  befunde=$(jq -r '.[] | "- \(.cve) (\(.schwere)): \(.titel)\n  \((.beschreibung // "") | .[0:600])\n  Details: https://osv.dev/vulnerability/\(.quelle // .cve)"' <<<"$5")
+  [ "$6" = rot ] && fehler="Fehler nach dem Update (Ende des Protokolls):
+$(tail -c 5000 "$LOG")"
+  prompt=$(cat <<EOF
+Du bist ein Sicherheits-Agent in einem Git-Repository auf einem CI-Runner. Secupipe hat im Paket $1 (Version $2)
+diese Schwachstellen gefunden; behoben in $3:
+
+$befunde
+
+Stand: Das Skript hat das Paket bereits auf $3 gehoben, soweit es das Ökosystem kennt (Build und Tests: $6).
+Die Änderungen liegen ungespeichert im Arbeitsverzeichnis (git diff).
+
+Aufgabe:
+1. Prüfe, wo und wie das Projekt das Paket nutzt (Importe, Aufrufe der betroffenen Funktionen laut Beschreibung).
+2. Bevorzuge das Update: Passe den Code an, bis Build und Tests grün sind (API-Änderungen, Importe, Typen).
+   Ist das Paket noch nicht aktualisiert (anderes Ökosystem), aktualisiere es selbst mit dem Paketmanager.
+3. Nur wenn das Update ohne größere Umbauten nicht möglich ist UND du belegen kannst, dass der verwundbare Code
+   im Projekt nicht erreichbar oder nicht ausnutzbar ist: stelle alle geänderten Dateien mit Edit wieder her
+   und melde "nicht_betroffen".
+
+Regeln: Kein Refactoring, keine Tests abschalten, keine Prüfungen abschwächen. Keine Commits, kein Push.
+
+Schreibe zum Schluss die Datei $ERGEBNIS im Wurzelverzeichnis des Repositorys mit genau diesem JSON:
+{"ergebnis": "fix" oder "nicht_betroffen",
+ "justification": nur bei nicht_betroffen eine von component_not_present, vulnerable_code_not_present,
+                  vulnerable_code_not_in_execute_path, vulnerable_code_cannot_be_controlled_by_adversary,
+                  inline_mitigations_already_exist,
+ "begruendung": "Deutsch, 2 bis 5 Sätze mit Belegen (Dateien, Funktionen)",
+ "konfidenz": 0.0 bis 1.0}
+Ende danach mit einer kurzen Zusammenfassung auf Deutsch: was du geprüft und geändert hast.
+
+$fehler
+EOF
+)
+  rm -f "$ERGEBNIS"
+  local args=(-p "$prompt" --permission-mode acceptEdits --max-turns "${KI_MAX_TURNS:-60}" --max-budget-usd "${KI_BUDGET_USD:-5}"
+    --allowedTools "Read Edit Write Glob Grep Bash(npm *) Bash(npx *) Bash(node *) Bash(go *) Bash(python3 *) Bash(pip *) Bash(mvn *) Bash(gradle *) Bash(./gradlew *) Bash(git diff*) Bash(git status*) Bash(git grep*) Bash(git log*) Bash(ls *) Bash(cat *)")
+  [ -n "${KI_MODEL:-}" ] && args+=(--model "$KI_MODEL")
+  claude "${args[@]}" > "$WORK/ki.txt" 2>&1 || { cat "$WORK/ki.txt"; return 1; }
+  cat "$WORK/ki.txt"
+}
+
 # ---------- je Paket ein PR ----------
 
 # Gruppen: gleicher Paket-purl (ohne Version) → höchste gefixte Version
@@ -270,7 +320,8 @@ while IFS= read -r g; do
   alt=$(jq -r '.[0].version' <<<"$g")
   neu=$(jq -r '.[].fixVersion' <<<"$g" | sort -V | tail -1)
   cves=$(jq -r '[.[].cve] | unique | join(", ")' <<<"$g")
-  ki_erlaubt=$(jq -r 'any(.[]; .ki)' <<<"$g")
+  ki_erlaubt=$(jq -r 'any(.[]; .kiErlaubt // .ki)' <<<"$g")
+  modus=$(jq -r '.[0].modus // "update_ki"' <<<"$g")
   typ=$(purl_typ "$purl"); name=$(purl_name "$purl")
   if [ "$typ" = npm ]; then
     ziel=$(npm_ziel "$name" "$neu")
@@ -292,7 +343,21 @@ while IFS= read -r g; do
       pypi)   update_pypi "$name" "$neu" && ok=1 ;;
       *)      warn "Ökosystem $typ: kein automatisches Update, nur mit KI-Agent" ;;
     esac
-    if [ "$ok" = 1 ] && pruefen; then
+    if [ "$modus" = agent ] && [ "$ki_erlaubt" = true ] && [ "$KI_VERFUEGBAR" = 1 ]; then
+      stand=keins
+      if [ "$ok" = 1 ]; then if pruefen; then stand=gruen; else stand=rot; fi; fi
+      if ki_agent "$name" "$alt" "$neu" "$cves" "$g" "$stand"; then
+        if [ "$(jq -r '.ergebnis // empty' "$ERGEBNIS" 2>/dev/null)" = nicht_betroffen ]; then
+          info "KI-Agent: nicht betroffen, schlägt VEX-Bewertung vor"
+        elif pruefen; then
+          info "Build und Tests grün nach KI-Agent"
+        else
+          warn "Nach KI-Agent nicht grün: PR als Entwurf"
+        fi
+      else
+        warn "KI-Agent abgebrochen: PR als Entwurf"
+      fi
+    elif [ "$ok" = 1 ] && pruefen; then
       info "Build und Tests grün nach Update"
     elif [ "$ki_erlaubt" = true ] && [ "$KI_VERFUEGBAR" = 1 ]; then
       art=ki
@@ -309,8 +374,24 @@ while IFS= read -r g; do
     fi
   } 2>&1 | tee -a "$LOG"
   # Variablen aus der Pipe-Subshell zurückholen
-  art=$(grep -q "KI-Agent passt den Code an" "$LOG" && echo ki || echo update)
+  art=$(grep -qE "KI-Agent (passt|arbeitet)" "$LOG" && echo ki || echo update)
   entwurf=$(grep -q "PR als Entwurf" "$LOG" && echo true || echo false)
+
+  # KI-Agent hält das Projekt für nicht betroffen: VEX-Vorschlag statt PR (Freigabe in Secupipe)
+  if grep -q "KI-Agent: nicht betroffen" "$LOG"; then
+    vex=$(jq -c '{justification, begruendung, konfidenz: (.konfidenz // 0.5)}' "$ERGEBNIS")
+    rm -f "$ERGEBNIS"
+    body=$(jq -n --argjson v "$vex" --arg l "$(tail -c 3000 "$WORK/ki.txt")" '{status:"vex", art:"ki", vex:$v, log:$l}')
+    for id in "${ids[@]}"; do
+      sp PUT "/ci/fixes/$id" "$body" >/dev/null || warn "VEX-Vorschlag für $id nicht gemeldet"
+      unset "OFFEN[$id]"
+    done
+    info "VEX-Vorschlag an Secupipe gemeldet (Freigabe dort)"
+    git checkout -q -f "$BASE_SHA"; git clean -qfd
+    gruppe_ende
+    continue
+  fi
+  rm -f "$ERGEBNIS"
 
   if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
     warn "$name: keine Änderung möglich (Paket nicht gefunden oder Ökosystem nicht unterstützt)"
@@ -333,7 +414,7 @@ while IFS= read -r g; do
     jq -r '.[] | "- **\(.cve)** (\(.schwere)): \(.titel)"' <<<"$g" | sort -u
     echo
     if [ "$art" = ki ]; then
-      echo "Das Update allein hat Build oder Tests gebrochen. Ein KI-Agent hat den Code auf dem CI-Runner angepasst:"
+      echo "Ein KI-Agent hat das Update auf dem CI-Runner geprüft und den Code angepasst:"
       echo
       echo '```'; tail -c 4000 "$WORK/ki.txt" 2>/dev/null; echo '```'
     else
