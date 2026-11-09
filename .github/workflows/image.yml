@@ -1,0 +1,32 @@
+name: Image
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Skript prüfen
+        run: bash -n autofix.sh && shellcheck -S warning autofix.sh
+      - name: Image bauen
+        run: docker build --build-arg VERSION="${GITHUB_REF_NAME}-${GITHUB_SHA::7}" -t secupipe-autofix:ci .
+      - name: Werkzeuge im Image
+        run: docker run --rm --entrypoint bash secupipe-autofix:ci -c 'git --version && node --version && go version && jq --version && claude --version'
+      - name: Nach ghcr.io (main → :edge, Tag v1.2.3 → :1, :1.2, :1.2.3)
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img=ghcr.io/${{ github.repository_owner }}/secupipe-autofix
+          tags=()
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            v=${GITHUB_REF_NAME#v}; tags=("$v" "${v%.*}" "${v%%.*}")
+          else
+            tags=(edge)
+          fi
+          for t in "${tags[@]}"; do docker tag secupipe-autofix:ci "$img:$t" && docker push "$img:$t"; done

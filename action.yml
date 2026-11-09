@@ -1,0 +1,45 @@
+name: Secupipe Autofix
+description: Öffnet Pull Requests, die Schwachstellen aus Secupipe beheben; optional passt ein KI-Agent den Code an.
+author: Secupipe
+branding:
+  icon: shield
+  color: blue
+inputs:
+  token:
+    description: Pipeline-Token aus Secupipe (Secret SECUPIPE_TOKEN)
+    required: true
+  auto:
+    description: Aufträge für alle offenen Befunde ab diesem Schweregrad anlegen (kritisch, hoch, mittel, niedrig); leer = nur angeforderte
+    required: false
+    default: ''
+  check:
+    description: eigener Prüfbefehl (Standard je Ökosystem, z. B. npm run build + test, go build + test)
+    required: false
+    default: ''
+  anthropic-api-key:
+    description: optional, für den KI-Agenten (Modul KI); bleibt auf dem Runner
+    required: false
+    default: ''
+  model:
+    description: optional, Modell für den KI-Agenten
+    required: false
+    default: ''
+  api:
+    description: Secupipe-API
+    required: false
+    default: https://api.secupipe.com/v1
+  github-token:
+    description: Token für Branch und Pull Request
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: docker
+  image: docker://ghcr.io/costa-chown/secupipe-autofix:1
+  env:
+    SECUPIPE_TOKEN: ${{ inputs.token }}
+    SECUPIPE_API: ${{ inputs.api }}
+    AUTO: ${{ inputs.auto }}
+    CHECK_CMD: ${{ inputs.check }}
+    ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+    KI_MODEL: ${{ inputs.model }}
+    GITHUB_TOKEN: ${{ inputs.github-token }}
