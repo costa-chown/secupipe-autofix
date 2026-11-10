@@ -90,7 +90,83 @@ docker run --rm -v "$PWD:/repo" -w /repo \
   ghcr.io/costa-chown/secupipe-autofix:1
 ```
 
-## Umgebung
+## Code-Scan: eigenen Code mit KI prüfen
+
+Das Image enthält einen zweiten Befehl, `secupipe-codescan`. Ein KI-Agent (Claude Code) prüft den eigenen Quellcode
+im ausgecheckten Repository auf Schwachstellen, etwa Injection, fehlende Rechteprüfung, Zugriff auf Daten anderer
+Mandanten oder fest eingetragene Geheimnisse. Die Befunde erscheinen in Secupipe unter Schwachstellen, neben den
+Befunden aus dem SBOM-Abgleich: mit Frist, VEX-Bewertung, Alarm und Jira. Der Code-Scan braucht das Modul KI.
+
+**Secupipe bekommt keinen Quellcode.** Gemeldet werden je Befund nur CWE, Datei, Zeile, Funktion, Beschreibung und
+Empfehlung. Der Agent darf nur lesen: Er ändert keine Dateien, führt keinen Code des Repositorys aus und hat über
+seine Werkzeuge keinen Netzzugriff. Der Quellcode geht an den KI-Anbieter, dessen Schlüssel du hinterlegst
+(Anthropic, oder Bedrock/Vertex in einer EU-Region).
+
+So läuft ein Scan ab:
+
+1. Der Job holt die bekannten Code-Befunde des Repositorys bei Secupipe ab.
+2. **Suche:** Der Agent prüft den Code nach Risiko (Eingänge aus dem Netz, Anmeldung, Datenbank, Dateien, Kryptografie)
+   und prüft jeden bekannten Befund erneut: noch vorhanden oder behoben.
+3. **Nachprüfung:** Ein zweiter Durchgang versucht, jeden neuen Befund zu widerlegen, und streicht Fehlalarme.
+4. Befunde ab 60 % Konfidenz gehen an Secupipe. Neue Befunde beginnen »in Prüfung«.
+
+Dieselbe Stelle wird nicht doppelt angelegt: Secupipe erkennt sie an CWE, Datei und Funktion, auch wenn der Agent sie
+anders formuliert oder die Zeile sich verschiebt. Einen als »nicht betroffen« bewerteten Befund (Fehlalarm) meldet der
+Agent nicht erneut. Hält der Agent einen Befund für behoben, wird das in Secupipe ein Vorschlag am Befund; gültig ist
+er erst, wenn ein Mensch ihn freigibt. Ein Befund gilt nicht als behoben, nur weil ein Lauf ihn nicht mehr nennt.
+
+```yaml
+# .github/workflows/secupipe-codescan.yml
+name: Secupipe Code-Scan
+on:
+  pull_request:              # nur geänderte Dateien
+  schedule:
+    - cron: '23 3 * * 1'     # montags das ganze Repository
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  codescan:
+    runs-on: ubuntu-latest
+    container: ghcr.io/costa-chown/secupipe-autofix:1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: secupipe-codescan
+        env:
+          SECUPIPE_TOKEN: ${{ secrets.SECUPIPE_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REPO: ${{ github.repository }}
+          FAIL_ON: hoch
+```
+
+In GitHub Actions erscheinen neue Befunde zusätzlich als Hinweis an der Zeile im Pull Request.
+
+GitLab CI: derselbe Job wie beim Autofix, mit `script: [secupipe-codescan]` und den Regeln
+`$CI_PIPELINE_SOURCE == "merge_request_event"` (geänderte Dateien) und `"schedule"` (ganzes Repository).
+Andere CI-Systeme und lokal:
+
+```bash
+docker run --rm -v "$PWD:/repo" -w /repo --entrypoint secupipe-codescan \
+  -e SECUPIPE_TOKEN -e ANTHROPIC_API_KEY -e REPO=acme/shop \
+  ghcr.io/costa-chown/secupipe-autofix:1
+```
+
+| Variable | Bedeutung |
+|---|---|
+| `SECUPIPE_TOKEN`, `REPO` | wie beim Autofix |
+| `ANTHROPIC_API_KEY` | Schlüssel für den Agenten (alternativ `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`) |
+| `UMFANG` | `voll` = ganzes Repository, `diff` = nur geänderte Dateien. Standard: `diff` in Pull/Merge Requests, sonst `voll` |
+| `DIFF_BASE` | Vergleichsstand für `diff`, Standard der Zielbranch des Pull/Merge Requests |
+| `PFADE` | nur diese Verzeichnisse prüfen, z. B. `"src api"` |
+| `FAIL_ON` | Lauf schlägt fehl, wenn offene Code-Befunde ab diesem Schweregrad vorliegen |
+| `MIN_KONFIDENZ` | Befunde unter diesem Wert nicht melden, Standard `0.6` |
+| `PRUEFEN=0` | Nachprüfung auslassen (halbe Kosten, mehr Fehlalarme) |
+| `DRY_RUN=1` | nichts an Secupipe melden, Ergebnis nur ausgeben |
+| `KI_MODEL`, `KI_MAX_TURNS` (120), `KI_BUDGET_USD` (10) | Grenzen je Durchgang |
+
+## Umgebung (Autofix)
 
 | Variable | Bedeutung |
 |---|---|

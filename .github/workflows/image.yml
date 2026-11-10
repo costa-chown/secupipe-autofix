@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Skript prüfen
-        run: bash -n autofix.sh && shellcheck -S warning autofix.sh
+        run: bash -n autofix.sh && bash -n codescan.sh && shellcheck -S warning autofix.sh codescan.sh
       - name: Image bauen
         run: docker build --build-arg VERSION="${GITHUB_REF_NAME}-${GITHUB_SHA::7}" -t secupipe-autofix:ci .
       - name: Werkzeuge im Image
