@@ -43,8 +43,9 @@ urlenc() { jq -rn --arg v "$1" '$v|@uri'; }
 
 [ -n "${DRY_RUN:-}" ] || [ -n "${SECUPIPE_TOKEN:-}" ] || fail "SECUPIPE_TOKEN fehlt. In Secupipe unter Pipelines ein Token erzeugen und als Secret hinterlegen."
 [ -n "$REPO" ] || fail "REPO fehlt (z. B. acme/shop), genauso geschrieben wie beim SBOM-Upload (pipeline=…)."
-git rev-parse --git-dir >/dev/null 2>&1 || fail "Kein Git-Repository im Arbeitsverzeichnis $(pwd)."
+# im Container-Job gehört das Arbeitsverzeichnis einem anderen Benutzer; ohne diese Freigabe verweigert git den Zugriff
 git config --global --add safe.directory "$(pwd)"
+git rev-parse --git-dir >/dev/null 2>&1 || fail "Kein Git-Repository im Arbeitsverzeichnis $(pwd)."
 if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${CLAUDE_CODE_USE_BEDROCK:-}" ] && [ -z "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
   fail "Für den Code-Scan ANTHROPIC_API_KEY als Secret hinterlegen (oder Bedrock/Vertex einrichten)."
 fi

@@ -33,8 +33,9 @@ fail() { if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::error::$*"; else printf '
 
 [ -n "${SECUPIPE_TOKEN:-}" ] || fail "SECUPIPE_TOKEN fehlt. In Secupipe unter Pipelines ein Token erzeugen und als Secret hinterlegen."
 [ -n "$REPO" ] || fail "REPO fehlt (z. B. acme/shop), genauso geschrieben wie beim SBOM-Upload (pipeline=…)."
-git rev-parse --git-dir >/dev/null 2>&1 || fail "Kein Git-Repository im Arbeitsverzeichnis $(pwd)."
+# im Container-Job gehört das Arbeitsverzeichnis einem anderen Benutzer; ohne diese Freigabe verweigert git den Zugriff
 git config --global --add safe.directory "$(pwd)"
+git rev-parse --git-dir >/dev/null 2>&1 || fail "Kein Git-Repository im Arbeitsverzeichnis $(pwd)."
 
 sp() { # Methode, Pfad, [JSON-Body]
   curl -sS --fail-with-body --retry 3 -X "$1" -H "Authorization: Bearer $SECUPIPE_TOKEN" -H "Content-Type: application/json" \
