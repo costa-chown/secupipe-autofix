@@ -94,7 +94,9 @@ if [ -n "${SECUPIPE_TOKEN:-}" ]; then
   status=$(sp GET "/ci/codescan?repo=$(urlenc "$REPO")")
   case "$status" in
     200) cp "$WORK/antwort.json" "$WORK/bekannt.json" ;;
-    *) fail "Secupipe antwortet mit $status: $(api_fehler)" ;;
+    *) # im Probelauf geht es auch ohne die bekannten Befunde weiter (z. B. Modul KI noch nicht gebucht)
+       if [ -n "${DRY_RUN:-}" ]; then warn "Bekannte Befunde nicht abgeholt ($status): $(api_fehler)"
+       else fail "Secupipe antwortet mit $status: $(api_fehler)"; fi ;;
   esac
 fi
 # im Umfang diff nur Befunde in geänderten Dateien erneut prüfen
