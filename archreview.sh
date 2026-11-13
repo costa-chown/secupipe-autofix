@@ -15,6 +15,8 @@
 #   4. Nachprüfung Belege werden mechanisch geprüft (Datei vorhanden, Zeile im Bereich), dann versucht ein
 #                  weiterer Agent jeden Befund zu widerlegen
 #   5. Meldung     Modell, Diagramm (Mermaid) und Befunde an Secupipe; Markdown-Bericht als Artefakt im Runner
+#   6. Gesamt      ein Agent fasst die Modelle aller Repositorys des Projekts aus Secupipe zusammen (kein Quellcode)
+#                  und macht Verbesserungsvorschläge für die Architektur als Ganzes
 #
 # Umgebung
 #   SECUPIPE_TOKEN     Pipeline-Token (Pflicht, außer bei DRY_RUN)
@@ -33,6 +35,8 @@
 #   PARALLEL=0         Prüfer nacheinander statt parallel starten
 #   PRUEFEN=0          Nachprüfung durch einen weiteren Agenten auslassen
 #   DRY_RUN=1          nichts an Secupipe melden
+#   GESAMT=0           Schritt 6 (Gesamtarchitektur des Projekts) auslassen
+#   NUR_GESAMT=1       nur Schritt 6: Gesamtarchitektur aus den gespeicherten Modellen neu erstellen
 #   KI_MODEL, KI_MAX_TURNS (150), KI_BUDGET_USD (8 je Agent)
 set -euo pipefail
 
@@ -50,6 +54,24 @@ fail() { if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::error::$*"; else printf '
 gruppe() { if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::$*"; else echo "── $* ──"; fi; }
 gruppe_ende() { [ -z "${GITHUB_ACTIONS:-}" ] || echo "::endgroup::"; }
 urlenc() { jq -rn --arg v "$1" '$v|@uri'; }
+# mermaid: Diagramm aus einem Modell, ohne KI. Eine Untergruppe je Zone, Kanten mit Protokoll; unverschlüsselt gestrichelt
+mermaid() { # Modell-Datei
+  jq -r '
+    def lbl: tostring | gsub("[\"<>{}\\[\\]|`#;]"; " ") | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | .[0:60];
+    def nid: "k_" + gsub("-"; "_");
+    {nutzer: "Nutzer und Clients", rand: "Rand (Eingang aus dem Netz)", anwendung: "Anwendung", daten: "Daten", extern: "Dienste Dritter"} as $zn
+    | {datenbank: ["[(", ")]"], speicher: ["[(", ")]"], cache: ["[(", ")]"], warteschlange: ["[/", "/]"],
+       nutzer: ["([", "])"], extern: ["{{", "}}"], gateway: ["[[", "]]"]} as $form
+    | "flowchart LR",
+      (["nutzer", "rand", "anwendung", "daten", "extern"][] as $z
+       | [.komponenten[] | select(.zone == $z)] | select(length > 0)
+       | "  subgraph z_\($z)[\"\($zn[$z])\"]",
+         (.[] | ($form[.art] // ["[", "]"]) as $f
+              | "    \(.id | nid)\($f[0])\"\(.name | lbl)\(if .technik != "" then "<br/><small>\(.technik | lbl)</small>" else "" end)\"\($f[1])"),
+         "  end"),
+      (.fluesse[] | "  \(.von | nid) \(if .verschluesselt == false then "-." else "--" end)\(if .protokoll != "" then " \"\(.protokoll | lbl)\" " else "" end)\(if .verschluesselt == false then ".->" else "-->" end) \(.nach | nid)")
+  ' "$1"
+}
 
 [ -n "${DRY_RUN:-}" ] || [ -n "${SECUPIPE_TOKEN:-}" ] || fail "SECUPIPE_TOKEN fehlt. In Secupipe unter Pipelines ein Token erzeugen und als Secret hinterlegen."
 [ -n "$REPO" ] || fail "REPO fehlt (z. B. acme/shop), genauso geschrieben wie beim SBOM-Upload (pipeline=…)."
@@ -204,6 +226,111 @@ for b in $BEREICHE; do ergebnis_dateien+=(".secupipe-arch-$b.json"); done
 aufraeumen() { rm -f "${ergebnis_dateien[@]}" .secupipe-arch-pruefung.json; }
 aufraeumen
 trap aufraeumen EXIT
+
+# ---------- 6. Gesamtarchitektur des Projekts (Funktion, läuft nach der Meldung) ----------
+
+gesamt() {
+  [ -n "${SECUPIPE_TOKEN:-}" ] || { warn "Gesamtarchitektur braucht SECUPIPE_TOKEN."; return 0; }
+  local status
+  status=$(sp GET "/ci/architektur/projekt?repo=$(urlenc "$REPO")")
+  [ "$status" = 200 ] || { warn "Gesamtarchitektur: Stand des Projekts nicht abgeholt ($status): $(api_fehler)"; return 0; }
+  cp "$WORK/antwort.json" "$WORK/projekt.json"
+  local projekt n
+  projekt=$(jq -r .projekt "$WORK/projekt.json"); n=$(jq '.repos | length' "$WORK/projekt.json")
+  gruppe "KI-Agent: Gesamtarchitektur des Projekts $projekt ($n Repositorys)"
+  jq '{projekt, repos: [.repos[] | {repo, commit, modell, offene_befunde: .befunde, sboms}], letzte_zusammenfassung: .vorher}' \
+    "$WORK/projekt.json" > .secupipe-projekt-eingabe.json
+  ergebnis_dateien+=(.secupipe-projekt-eingabe.json .secupipe-projekt.json)
+  rm -f .secupipe-projekt.json
+  local prompt
+  prompt=$(cat <<EOF
+Du bist Chef-Architekt. In der Datei .secupipe-projekt-eingabe.json stehen die Architekturmodelle aller Repositorys
+des Projekts »$projekt« (je Repository: Komponenten mit Zonen und SBOM, Datenflüsse, offene Befunde aus Sicherheit,
+CRA Anhang I und Struktur) und die letzte Zusammenfassung. Das aktuelle Repository ($REPO) darfst du lesen, die
+übrigen nicht; arbeite mit den Modellen.
+
+Aufgabe 1: Gesamtmodell. Füge die Modelle zu einem zusammen. Dieselbe Komponente aus Sicht mehrerer Repositorys
+(z. B. die API, die im Web-Repository als externer Dienst auftaucht) wird EIN Knoten, mit dem Repository, in dem
+ihr Code liegt. Ergänze Datenflüsse zwischen den Repositorys. Dienste Dritter, die mehrere Repositorys nutzen, nur
+einmal. Höchstens 60 Komponenten, eindeutige ids (a-z, 0-9, - und _).
+- repo: Repository der Komponente (genau wie in der Eingabe) oder leer für Nutzer, Dienste Dritter, Infrastruktur.
+- sbom: nur die SBOM aus demselben Repository, wie in dessen Modell.
+
+Aufgabe 2: Verbesserungsvorschläge für die Architektur als Ganzes, 5 bis 15 Stück. Nicht die Einzelbefunde
+wiederholen, sondern übergreifend denken: Grenzen und Zuschnitt der Komponenten, Vertrauenszonen und zentrale
+Anmeldung, Geheimnisverwaltung, Ausfallsicherheit und Betrieb (Sicherung, Überwachung, Wiederanlauf), sichere
+Lieferkette und Updates (CRA), Vereinheitlichung über Repositorys hinweg, Vereinfachung, Kosten. Jeder Vorschlag
+nennt den Nutzen und kann mehrere Befunde zusammenfassen (befunde: "repo#bereich/schluessel" aus der Eingabe).
+Vorschläge aus der letzten Zusammenfassung, die noch gelten, behalten ihren Schlüssel.
+- aufwand: klein (Tage), mittel (Wochen), gross (Monate). prioritaet: hoch, mittel, niedrig.
+
+$REGELN
+
+Schreibe zum Schluss die Datei .secupipe-projekt.json im Wurzelverzeichnis mit genau diesem JSON:
+{"zusammenfassung": "4 bis 8 Sätze: was das Projekt ist, wie die Repositorys zusammenspielen, Stärken und Schwächen",
+ "betrieb": "…", "updates": "…",
+ "komponenten": [{"id": "api", "name": "API", "art": "dienst", "zone": "anwendung", "technik": "Go",
+                  "beschreibung": "…", "belege": [], "sbom": "shop-api", "repo": "acme/shop-api"}],
+ "fluesse": [{"von": "web", "nach": "api", "protokoll": "HTTPS", "daten": "…", "authentifizierung": "…", "verschluesselt": true}],
+ "vorschlaege": [{"schluessel": "zentrale-geheimnisverwaltung", "titel": "kurz", "beschreibung": "3 bis 6 Sätze: was und wie",
+                  "nutzen": "1 bis 2 Sätze", "aufwand": "mittel", "prioritaet": "hoch",
+                  "komponenten": ["api"], "repos": ["acme/shop-api"], "befunde": ["acme/shop-api#sicherheit/…"]}]}
+EOF
+)
+  if ! KI_BUDGET_USD=${KI_BUDGET_GESAMT_USD:-3} agent gesamt "$prompt"; then
+    zeige gesamt; warn "Gesamtarchitektur: der KI-Agent ist abgebrochen."; gruppe_ende; return 0
+  fi
+  if [ ! -s .secupipe-projekt.json ] || ! jq -e 'type == "object"' .secupipe-projekt.json >/dev/null 2>&1; then
+    zeige gesamt; warn "Gesamtarchitektur: kein gültiges Ergebnis."; gruppe_ende; return 0
+  fi
+  jq '
+    def s($n): (. // "") | tostring | gsub("[\u0000-\u001f]"; " ") | .[0:$n];
+    def liste($n; $l): [(. // [])[] | tostring | .[0:$l]][0:$n];
+    . as $in
+    | ["nutzer","rand","anwendung","daten","extern"] as $zonen
+    | ["nutzer","frontend","dienst","job","datenbank","speicher","warteschlange","cache","gateway","extern"] as $arten
+    | {zusammenfassung: (.zusammenfassung | s(3000)), betrieb: (.betrieb | s(1500)), updates: (.updates | s(1500)),
+       komponenten: ([(.komponenten // [])[] | select(type == "object")
+                      | {id: (.id | s(40) | ascii_downcase), name: (.name | s(80)),
+                         art: ((.art // "") | tostring | ascii_downcase | if IN($arten[]) then . else "dienst" end),
+                         zone: ((.zone // "") | tostring | ascii_downcase | if IN($zonen[]) then . else "anwendung" end),
+                         technik: (.technik | s(120)), beschreibung: (.beschreibung | s(600)), belege: [],
+                         sbom: (.sbom | s(200)), repo: (.repo | s(200))}
+                      | select(.id | test("^[a-z0-9][a-z0-9_-]*$")) | select(.name != "")] | unique_by(.id) | .[0:60])}
+    | (.komponenten | map(.id)) as $ids
+    | . + {fluesse: ([($in.fluesse // [])[] | select(type == "object")
+                      | {von: (.von | s(40) | ascii_downcase), nach: (.nach | s(40) | ascii_downcase), protokoll: (.protokoll | s(60)),
+                         daten: (.daten | s(300)), authentifizierung: (.authentifizierung | s(200)),
+                         verschluesselt: (if .verschluesselt == true or .verschluesselt == false then .verschluesselt else null end)}
+                      | select((.von as $v | $ids | index($v)) and (.nach as $x | $ids | index($x)) and .von != .nach)]
+                     | unique_by([.von, .nach, .protokoll]) | .[0:160]),
+           vorschlaege: ([($in.vorschlaege // [])[] | select(type == "object")
+                          | {schluessel: (.schluessel | s(80) | ascii_downcase | gsub("[^a-z0-9-]+"; "-") | gsub("^-+|-+$"; "")),
+                             titel: (.titel | s(300)), beschreibung: (.beschreibung | s(4000)), nutzen: (.nutzen | s(1500)),
+                             aufwand: ((.aufwand // "") | tostring | ascii_downcase | gsub("ß"; "ss") | if IN("klein", "mittel", "gross") then . else "mittel" end),
+                             prioritaet: ((.prioritaet // "") | tostring | ascii_downcase | if IN("hoch", "mittel", "niedrig") then . else "mittel" end),
+                             komponenten: (.komponenten | liste(20; 40)), repos: (.repos | liste(20; 200)), befunde: (.befunde | liste(20; 300))}
+                          | select(.schluessel != "" and .titel != "")] | unique_by(.schluessel) | .[0:30])}
+  ' .secupipe-projekt.json > "$WORK/gesamt.json" || { warn "Gesamtarchitektur ließ sich nicht lesen."; gruppe_ende; return 0; }
+  rm -f .secupipe-projekt.json .secupipe-projekt-eingabe.json
+  if [ "$(jq '.komponenten | length' "$WORK/gesamt.json")" = 0 ]; then warn "Gesamtarchitektur ohne Komponenten."; gruppe_ende; return 0; fi
+  mermaid "$WORK/gesamt.json" > "$WORK/gesamt.mmd"
+  jq --rawfile mm "$WORK/gesamt.mmd" '{modell: {zusammenfassung, betrieb, updates, komponenten, fluesse}, mermaid: $mm, vorschlaege}' \
+    "$WORK/gesamt.json" > "$WORK/gesamt-meldung.json"
+  info "Gesamtarchitektur: $(jq '.komponenten | length' "$WORK/gesamt.json") Komponenten, $(jq '.vorschlaege | length' "$WORK/gesamt.json") Vorschläge"
+  jq -r '.vorschlaege[] | "  [\(.prioritaet)] \(.titel) (Aufwand \(.aufwand))"' "$WORK/gesamt.json"
+  if [ -n "${AUSGABE:-}" ]; then mkdir -p "$AUSGABE"; cp "$WORK/gesamt.json" "$AUSGABE/gesamt-$projekt.json"; cp "$WORK/gesamt.mmd" "$AUSGABE/gesamt-$projekt.mmd"; fi
+  if [ -n "${DRY_RUN:-}" ]; then info "DRY_RUN: Gesamtarchitektur nicht gemeldet."; gruppe_ende; return 0; fi
+  status=$(sp POST "/ci/architektur/projekt?repo=$(urlenc "$REPO")" "$WORK/gesamt-meldung.json")
+  if [ "$status" = 201 ]; then info "Secupipe: Gesamtarchitektur gespeichert. $(jq -r .link "$WORK/antwort.json")"
+  else warn "Gesamtarchitektur nicht angenommen ($status): $(api_fehler)"; fi
+  gruppe_ende
+}
+
+if [ "${NUR_GESAMT:-}" = 1 ]; then
+  gesamt
+  exit 0
+fi
 
 # ---------- 2. Modell ----------
 
@@ -512,22 +639,7 @@ jq --argjson min "$MIN_KONFIDENZ" '{kritisch: 0, hoch: 1, mittel: 2, niedrig: 3}
 
 # ---------- 5. Diagramm und Bericht ----------
 
-# Mermaid aus dem Modell, ohne KI: eine Untergruppe je Zone, Kanten mit Protokoll; unverschlüsselt gestrichelt
-jq -r '
-  def lbl: tostring | gsub("[\"<>{}\\[\\]|`#;]"; " ") | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | .[0:60];
-  def nid: "k_" + gsub("-"; "_");
-  {nutzer: "Nutzer und Clients", rand: "Rand (Eingang aus dem Netz)", anwendung: "Anwendung", daten: "Daten", extern: "Dienste Dritter"} as $zn
-  | {datenbank: ["[(", ")]"], speicher: ["[(", ")]"], cache: ["[(", ")]"], warteschlange: ["[/", "/]"],
-     nutzer: ["([", "])"], extern: ["{{", "}}"], gateway: ["[[", "]]"]} as $form
-  | "flowchart LR",
-    (["nutzer", "rand", "anwendung", "daten", "extern"][] as $z
-     | [.komponenten[] | select(.zone == $z)] | select(length > 0)
-     | "  subgraph z_\($z)[\"\($zn[$z])\"]",
-       (.[] | ($form[.art] // ["[", "]"]) as $f
-            | "    \(.id | nid)\($f[0])\"\(.name | lbl)\(if .technik != "" then "<br/><small>\(.technik | lbl)</small>" else "" end)\"\($f[1])"),
-       "  end"),
-    (.fluesse[] | "  \(.von | nid) \(if .verschluesselt == false then "-." else "--" end)\(if .protokoll != "" then " \"\(.protokoll | lbl)\" " else "" end)\(if .verschluesselt == false then ".->" else "-->" end) \(.nach | nid)")
-' "$WORK/modell.json" > "$WORK/architektur.mmd"
+mermaid "$WORK/modell.json" > "$WORK/architektur.mmd"
 
 mkdir -p "$AUSGABE"
 cp "$WORK/architektur.mmd" "$AUSGABE/architektur.mmd"
@@ -591,7 +703,9 @@ status=$(sp POST "$pfad" "$WORK/meldung.json")
 case "$status" in
   201|422)
     jq -r '"Secupipe: \(.neu) neue Befunde, \(.entfallen) seit dem letzten Lauf entfallen, \(.akzeptiert) hingenommen. Offen: \(.offen.kritisch) kritisch, \(.offen.hoch) hoch, \(.offen.mittel) mittel, \(.offen.niedrig) niedrig.\n\(.link)"' "$WORK/antwort.json"
-    [ "$status" = 201 ] || fail "Freigabe-Gate: offene Architektur-Befunde ab Schweregrad $FAIL_ON. Bewertung in Secupipe: $(jq -r .link "$WORK/antwort.json")"
+    gate=$status link=$(jq -r .link "$WORK/antwort.json")
+    [ "${GESAMT:-1}" = 0 ] || gesamt
+    [ "$gate" = 201 ] || fail "Freigabe-Gate: offene Architektur-Befunde ab Schweregrad $FAIL_ON. Bewertung in Secupipe: $link"
     ;;
   *) fail "Secupipe hat das Ergebnis nicht angenommen ($status): $(api_fehler)" ;;
 esac

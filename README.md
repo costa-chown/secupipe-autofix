@@ -292,6 +292,16 @@ jobs:
 | `CHECK_CMD` | eigener Prüfbefehl; sonst Go: build, vet, test; npm: build (`NPM_TEST=1` auch test) |
 | `KI_MODEL`, `KI_MAX_TURNS` (80), `KI_BUDGET_USD` (5) | Grenzen je Befund |
 
+### Gesamtarchitektur und Verbesserungsvorschläge
+
+Nach jedem Review fasst ein weiterer Agent die Modelle aller Repositorys des Projekts zusammen, die in Secupipe
+gespeichert sind (z. B. `shop-api`, `shop-web`, `shop-site`): dieselbe Komponente aus Sicht mehrerer Repositorys wird
+ein Knoten, Datenflüsse zwischen den Repositorys kommen dazu. Daraus macht er 5 bis 15 **Verbesserungsvorschläge für
+die Architektur als Ganzes**, je mit Nutzen, Aufwand (Tage, Wochen, Monate), Priorität, betroffenen Komponenten und
+den Befunden, die der Vorschlag zusammenfasst. Er arbeitet nur mit Modellen und Befunden, nicht mit Quellcode; Kosten
+höchstens `KI_BUDGET_GESAMT_USD` (Standard 3). `GESAMT=0` schaltet den Schritt ab, `NUR_GESAMT=1` erstellt nur die
+Gesamtarchitektur neu, ohne das Repository erneut zu prüfen.
+
 ### Projekte und SBOMs
 
 Secupipe gliedert die Architektur nach Projekten. Ohne Angabe gilt der Repository-Name ohne Endung wie `-api`,
