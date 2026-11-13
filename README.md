@@ -166,6 +166,85 @@ docker run --rm -v "$PWD:/repo" -w /repo --entrypoint secupipe-codescan \
 | `DRY_RUN=1` | nichts an Secupipe melden, Ergebnis nur ausgeben |
 | `KI_MODEL`, `KI_MAX_TURNS` (120), `KI_BUDGET_USD` (10) | Grenzen je Durchgang |
 
+## Architektur-Review: Architektur beschreiben und prüfen
+
+Der dritte Befehl im Image, `secupipe-archreview`, lässt KI-Agenten die Architektur des Repositorys beschreiben und
+prüfen. Ergebnis ist ein **Architekturmodell mit Diagramm** (Komponenten, Vertrauenszonen, Datenflüsse) und eine Liste
+von **Befunden mit Belegen** (Datei und Zeile). Secupipe zeigt beides unter »Architektur«; das Diagramm und die
+Beschreibung lassen sich als Teil der technischen Dokumentation nach CRA Anhang VII herunterladen. Braucht das Modul KI.
+
+```mermaid
+flowchart LR
+  F["1 Fakten<br/><small>ohne KI: Manifeste, Deployment,<br/>Ports, Umgebungsvariablen, Hosts</small>"]
+  M["2 Modell<br/><small>Agent: Komponenten, Zonen,<br/>Datenflüsse</small>"]
+  subgraph P["3 Prüfung (parallel)"]
+    S["Sicherheit<br/><small>STRIDE je Zonengrenze</small>"]
+    C["CRA Anhang I<br/><small>Teil I und II</small>"]
+    T["Struktur und Betrieb"]
+  end
+  V["4 Nachprüfung<br/><small>Belege mechanisch,<br/>dann Agent widerlegt</small>"]
+  R["5 Meldung<br/><small>Modell, Diagramm, Befunde<br/>an Secupipe; Bericht im Runner</small>"]
+  F --> M --> S & C & T --> V --> R
+```
+
+1. **Fakten** sammelt der Job ohne KI: Sprachen, Paket-Manifeste, Dockerfiles, Compose, Kubernetes, Terraform,
+   CI-Dateien, freigegebene Ports, Namen der Umgebungsvariablen (keine Werte) und Hosts, die der Code anspricht.
+2. **Modell:** Ein Agent beschreibt Komponenten (höchstens 30), ordnet sie fünf Zonen zu (Nutzer, Rand, Anwendung,
+   Daten, Dienste Dritter) und erfasst die Datenflüsse mit Protokoll, Daten, Anmeldung und Verschlüsselung.
+   In Pull Requests aktualisiert er nur das Modell des letzten Laufs.
+3. **Prüfung:** Drei Agenten parallel. *Sicherheit* erstellt ein Bedrohungsmodell nach STRIDE für jeden Fluss über
+   eine Zonengrenze. *CRA* prüft die grundlegenden Anforderungen aus Anhang I Teil I und II, soweit sie am Repository
+   erkennbar sind (sichere Voreinstellungen, Zugriffsschutz, Verschlüsselung, Protokollierung, SBOM, Meldekanal,
+   sichere Updates). *Struktur* prüft Schichten, Kopplung, Ausfallpunkte, Zeitlimits und Konfiguration.
+4. **Nachprüfung:** Belege müssen auf vorhandene Dateien und Zeilen zeigen; Befunde mit erfundenen Belegen fallen
+   weg. Dann versucht ein weiterer Agent, jeden Befund zu widerlegen.
+5. **Meldung:** Modell, Diagramm (Mermaid) und Befunde ab 60 % Konfidenz gehen an Secupipe. Im Runner liegen
+   `architektur.md` (Bericht mit Diagramm), `architektur.mmd` und `architektur.json`; in GitHub Actions steht der
+   Bericht zusätzlich in der Zusammenfassung des Laufs.
+
+Jeder Befund hat einen festen Schlüssel; Secupipe zeigt, was seit dem letzten Lauf neu ist und was entfallen ist.
+Befunde, die ihr bewusst hinnehmt, markiert ihr in Secupipe als »hingenommen« mit Begründung; die Agenten melden sie
+dann nicht mehr. Wie beim Code-Scan bekommt Secupipe keinen Quellcode, nur Modell und Befundtexte.
+
+```yaml
+# .github/workflows/secupipe-architektur.yml
+name: Secupipe Architektur-Review
+on:
+  pull_request:              # nur Änderungen gegenüber dem Zielbranch
+  schedule:
+    - cron: '41 3 1 * *'     # monatlich das ganze Repository
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  architektur:
+    runs-on: ubuntu-latest
+    container: ghcr.io/costa-chown/secupipe-autofix:1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: secupipe-archreview
+        env:
+          SECUPIPE_TOKEN: ${{ secrets.SECUPIPE_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          REPO: ${{ github.repository }}
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: architektur
+          path: secupipe-architektur/
+```
+
+| Variable | Bedeutung |
+|---|---|
+| `SECUPIPE_TOKEN`, `REPO`, `ANTHROPIC_API_KEY`, `UMFANG`, `DIFF_BASE`, `PFADE`, `FAIL_ON`, `MIN_KONFIDENZ`, `DRY_RUN` | wie beim Code-Scan |
+| `BEREICHE` | Standard `"sicherheit cra struktur"` |
+| `AUSGABE` | Verzeichnis für den Bericht, Standard `secupipe-architektur` |
+| `PARALLEL=0` | Prüf-Agenten nacheinander starten |
+| `PRUEFEN=0` | Nachprüfung auslassen |
+| `KI_MODEL`, `KI_MAX_TURNS` (150), `KI_BUDGET_USD` (8) | Grenzen je Agent; ein voller Lauf startet bis zu fünf Agenten |
+
 ## Umgebung (Autofix)
 
 | Variable | Bedeutung |
