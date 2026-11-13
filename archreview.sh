@@ -20,6 +20,7 @@
 #   SECUPIPE_TOKEN     Pipeline-Token (Pflicht, außer bei DRY_RUN)
 #   SECUPIPE_API       Standard https://api.secupipe.com/v1
 #   REPO               Repository für Secupipe, Standard GITHUB_REPOSITORY bzw. CI_PROJECT_PATH
+#   PROJEKT            optional: Projekt, zu dem das Repository gehört (Standard: Repository-Name ohne -api, -web, -site …)
 #   ANTHROPIC_API_KEY  Schlüssel für die KI-Agenten (oder CLAUDE_CODE_USE_BEDROCK / CLAUDE_CODE_USE_VERTEX)
 #   UMFANG             voll = ganzes Repository, diff = nur Änderungen gegenüber DIFF_BASE.
 #                      Standard: diff in Pull/Merge Requests, sonst voll
@@ -155,7 +156,7 @@ gruppe_ende
 
 # ---------- letzter Stand aus Secupipe ----------
 
-echo '{"modell":null,"befunde":[],"akzeptiert":[]}' > "$WORK/vorher.json"
+echo '{"modell":null,"befunde":[],"akzeptiert":[],"sboms":[]}' > "$WORK/vorher.json"
 if [ -n "${SECUPIPE_TOKEN:-}" ]; then
   status=$(sp GET "/ci/architektur?repo=$(urlenc "$REPO")")
   case "$status" in
@@ -170,6 +171,7 @@ if [ "$UMFANG" = diff ] && [ "$(jq '.modell == null' "$WORK/vorher.json")" = tru
 fi
 BEKANNT=$(jq -r '.befunde[] | "- \(.bereich)/\(.schluessel): \(.titel)"' "$WORK/vorher.json")
 AKZEPTIERT=$(jq -r '.akzeptiert[] | "- \(.schluessel): \(.begruendung)"' "$WORK/vorher.json")
+SBOMS=$(jq -r '(.sboms // [])[] | "- \(.asset) (Version \(.version), \(.pakete) Pakete)"' "$WORK/vorher.json")
 
 # ---------- Agenten ----------
 
@@ -211,7 +213,7 @@ MODELL_SCHEMA=$(cat <<'EOF'
  "updates": "1 bis 3 Sätze: wie Sicherheitsupdates zu den Nutzern kommen (Deployment, Paket, App-Store, automatische Updates)",
  "komponenten": [{"id": "api", "name": "API-Server", "art": "dienst", "zone": "anwendung",
                   "technik": "Go 1.24, chi", "beschreibung": "1 bis 2 Sätze: Aufgabe",
-                  "belege": ["cmd/api/main.go", "internal/api/server.go"]}],
+                  "belege": ["cmd/api/main.go", "internal/api/server.go"], "sbom": "shop-api"}],
  "fluesse": [{"von": "browser", "nach": "api", "protokoll": "HTTPS", "daten": "Sitzungscookie, Befunde",
               "authentifizierung": "Sitzungscookie (WorkOS)", "verschluesselt": true}]}
 EOF
@@ -230,6 +232,9 @@ Feldregeln:
 - fluesse: nur zwischen Komponenten aus der Liste, Richtung = wer die Verbindung aufbaut. verschluesselt true, false
   oder null (nicht erkennbar). Höchstens 80 Flüsse.
 - belege: Dateien im Repository, an denen man die Komponente erkennt (Einstiegspunkt, Konfiguration). Höchstens 5.
+- sbom: Name des SBOM-Assets aus der Liste unten, dessen Pakete in dieser Komponente ausgeliefert werden (z. B. das
+  Go-Modul eines Dienstes oder das npm-Projekt eines Frontends). Leer für Komponenten ohne eigene SBOM (Datenbank,
+  Dienste Dritter, Nutzer). Jede SBOM gehört zu höchstens einer Komponente.
 EOF
 )
 
@@ -262,6 +267,9 @@ $AUFGABE
 
 $(cat "$WORK/fakten.kurz.md")
 
+## SBOMs, die diese Pipeline an Secupipe hochlädt
+${SBOMS:-(keine)}
+
 $MODELL_REGELN
 
 $REGELN
@@ -292,7 +300,8 @@ jq --rawfile alle "$WORK/alle.txt" '
                        art: ((.art // "") | tostring | ascii_downcase | if IN($arten[]) then . else "dienst" end),
                        zone: ((.zone // "") | tostring | ascii_downcase | if IN($zonen[]) then . else "anwendung" end),
                        technik: (.technik | s(120)), beschreibung: (.beschreibung | s(600)),
-                       belege: [(.belege // [])[] | tostring | ltrimstr("./") | select(. as $d | $dateien | index($d))][0:5]}
+                       belege: [(.belege // [])[] | tostring | ltrimstr("./") | select(. as $d | $dateien | index($d))][0:5],
+                       sbom: (.sbom | s(200))}
                     | select(.id | test("^[a-z0-9][a-z0-9_-]*$")) | select(.name != "")]
                    | unique_by(.id) | .[0:30])}
   | (.komponenten | map(.id)) as $ids
@@ -541,9 +550,9 @@ jq -n --slurpfile m "$WORK/modell.json" --slurpfile b "$WORK/meldung-befunde.jso
   echo
   echo "## Komponenten"
   echo
-  echo "| Komponente | Zone | Technik | Aufgabe |"
-  echo "|---|---|---|---|"
-  jq -r '.komponenten[] | "| \(.name) | \(.zone) | \(.technik) | \(.beschreibung | gsub("\\|"; "/")) |"' "$WORK/modell.json"
+  echo "| Komponente | Zone | Technik | SBOM | Aufgabe |"
+  echo "|---|---|---|---|---|"
+  jq -r '.komponenten[] | "| \(.name) | \(.zone) | \(.technik) | \(if .sbom != "" then .sbom else "–" end) | \(.beschreibung | gsub("\\|"; "/")) |"' "$WORK/modell.json"
   echo
   echo "## Datenflüsse"
   echo
@@ -577,7 +586,7 @@ fi
 
 jq -n --slurpfile m "$WORK/modell.json" --slurpfile b "$WORK/meldung-befunde.json" --rawfile mm "$WORK/architektur.mmd" \
   '{modell: $m[0], mermaid: $mm, befunde: $b[0]}' > "$WORK/meldung.json"
-pfad="/ci/architektur?repo=$(urlenc "$REPO")&commit=$COMMIT&umfang=$UMFANG${FAIL_ON:+&fail_on=$(urlenc "$FAIL_ON")}"
+pfad="/ci/architektur?repo=$(urlenc "$REPO")${PROJEKT:+&projekt=$(urlenc "$PROJEKT")}&commit=$COMMIT&umfang=$UMFANG${FAIL_ON:+&fail_on=$(urlenc "$FAIL_ON")}"
 status=$(sp POST "$pfad" "$WORK/meldung.json")
 case "$status" in
   201|422)

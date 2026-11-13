@@ -13,11 +13,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Skript prüfen
-        run: bash -n autofix.sh && bash -n codescan.sh && bash -n archreview.sh && shellcheck -S warning autofix.sh codescan.sh archreview.sh
+        run: bash -n autofix.sh && bash -n codescan.sh && bash -n archreview.sh && bash -n archfix.sh && shellcheck -S warning autofix.sh codescan.sh archreview.sh archfix.sh
       - name: Image bauen
         run: docker build --build-arg VERSION="${GITHUB_REF_NAME}-${GITHUB_SHA::7}" -t secupipe-autofix:ci .
       - name: Werkzeuge im Image
-        run: docker run --rm --entrypoint bash secupipe-autofix:ci -c 'git --version && node --version && go version && jq --version && claude --version && test -x /usr/local/bin/secupipe-archreview'
+        run: docker run --rm --entrypoint bash secupipe-autofix:ci -c 'git --version && node --version && go version && jq --version && claude --version && test -x /usr/local/bin/secupipe-archreview && test -x /usr/local/bin/secupipe-archfix'
       - name: Nach ghcr.io (main → :edge, Tag v1.2.3 → :1, :1.2, :1.2.3)
         if: github.event_name == 'push'
         run: |

@@ -31,4 +31,5 @@ ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
 COPY autofix.sh /usr/local/bin/secupipe-autofix
 COPY codescan.sh /usr/local/bin/secupipe-codescan
 COPY archreview.sh /usr/local/bin/secupipe-archreview
+COPY archfix.sh /usr/local/bin/secupipe-archfix
 ENTRYPOINT ["/usr/local/bin/secupipe-autofix"]

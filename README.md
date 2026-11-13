@@ -245,6 +245,60 @@ jobs:
 | `PRUEFEN=0` | Nachprüfung auslassen |
 | `KI_MODEL`, `KI_MAX_TURNS` (150), `KI_BUDGET_USD` (8) | Grenzen je Agent; ein voller Lauf startet bis zu fünf Agenten |
 
+### Architektur-Befunde mit KI beheben (`secupipe-archfix`)
+
+Zu jedem Architektur-Befund lässt sich in Secupipe ein **KI-Fix** anfordern, oder die Pipeline legt Aufträge
+automatisch an (`AUTO=hoch`). `secupipe-archfix` holt die Aufträge ab (die schwersten zuerst, höchstens `MAX_FIXES`
+je Lauf). Für jeden Befund setzt ein KI-Agent die Empfehlung im Repository um, prüft Build und Tests und öffnet einen
+Pull Request. Gemergt wird nie automatisch.
+
+- Trifft der Befund nicht mehr zu, meldet der Agent das ohne PR.
+- Lässt er sich nicht im Repository beheben (Datensicherung auf dem Server, Einstellung in einem Cloud-Konto), meldet
+  der Agent »nicht möglich« mit einer Anleitung für den manuellen Schritt. Die Automatik legt dafür keinen neuen
+  Auftrag an.
+- Sind Build oder Tests nach der Änderung rot, gibt es keinen PR; der Auftrag ist »fehlgeschlagen« und lässt sich
+  erneut anfordern.
+- Änderungen an `.github/workflows` und neue Dateien über 1 MB übernimmt das Skript nicht.
+
+```yaml
+# .github/workflows/secupipe-architektur-fix.yml
+name: Secupipe Architektur-Fix
+on:
+  schedule:
+    - cron: '17 6-18/3 * * 1-5'   # werktags alle drei Stunden: angeforderte Fixes abholen
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  archfix:
+    runs-on: ubuntu-latest
+    container: ghcr.io/costa-chown/secupipe-autofix:1
+    steps:
+      - uses: actions/checkout@v5
+      - run: secupipe-archfix
+        env:
+          SECUPIPE_TOKEN: ${{ secrets.SECUPIPE_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # AUTO: hoch              # optional: alle offenen Befunde ab hoch automatisch
+```
+
+| Variable | Bedeutung |
+|---|---|
+| `AUTO` | Aufträge für alle offenen, nicht hingenommenen Befunde ab diesem Schweregrad anlegen |
+| `MAX_FIXES` | höchstens so viele Befunde je Lauf, Standard `3` |
+| `CHECK_CMD` | eigener Prüfbefehl; sonst Go: build, vet, test; npm: build (`NPM_TEST=1` auch test) |
+| `KI_MODEL`, `KI_MAX_TURNS` (80), `KI_BUDGET_USD` (5) | Grenzen je Befund |
+
+### Projekte und SBOMs
+
+Secupipe gliedert die Architektur nach Projekten. Ohne Angabe gilt der Repository-Name ohne Endung wie `-api`,
+`-web` oder `-site` als Projekt (`acme/shop-api` und `acme/shop-web` → `shop`); mit `PROJEKT=…` legt ihr es selbst
+fest. Das Review ordnet jeder Komponente die SBOM zu, die die Pipeline des Repositorys hochlädt; in Secupipe führt
+ein Klick auf die Komponente zur SBOM mit allen Paketen und Schwachstellen.
+
 ## Umgebung (Autofix)
 
 | Variable | Bedeutung |
