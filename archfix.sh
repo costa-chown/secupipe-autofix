@@ -121,8 +121,9 @@ open_pr() { # branch, titel, body-datei → PR-URL
     local auth=(-H "Authorization: Bearer ${GITHUB_TOKEN:?GITHUB_TOKEN fehlt}" -H "Accept: application/vnd.github+json")
     res=$(curl -sS "${auth[@]}" "$GH_API/repos/$repo/pulls?state=open&head=$owner:$1" | jq -r '.[0].html_url // empty')
     if [ -z "$res" ]; then
-      res=$(jq -n --arg h "$1" --arg b "$BASE" --arg t "$2" --rawfile d "$3" '{head:$h, base:$b, title:$t, body:$d}' |
-        curl -sS --fail-with-body "${auth[@]}" --data @- "$GH_API/repos/$repo/pulls" | jq -r .html_url)
+      jq -n --arg h "$1" --arg b "$BASE" --arg t "$2" --rawfile d "$3" '{head:$h, base:$b, title:$t, body:$d}' |
+        curl -sS "${auth[@]}" --data @- "$GH_API/repos/$repo/pulls" > "$WORK/pr-antwort.json" || true
+      res=$(jq -r '.html_url // empty' "$WORK/pr-antwort.json" 2>/dev/null || true)
     fi
   fi
   echo "$res"
@@ -267,7 +268,20 @@ $(tail -c 2500 "$WORK/pruefung-$i.txt")"
     echo "_Erstellt von Secupipe Architektur-Fix (KI-Agent). Bitte prüfen; der PR wird nicht automatisch gemergt._"
   } > "$WORK/pr-$i.md"
   push_branch "$branch"
-  url=$(open_pr "$branch" "Architektur: $titel" "$WORK/pr-$i.md")
+  url=$(open_pr "$branch" "Architektur: $titel" "$WORK/pr-$i.md" || true)
+  case "$url" in
+    https://*) ;;
+    *)
+      grund=$(jq -r '[.message, (.errors // [] | .[] | .message // empty)] | map(select(. != null)) | join(" ") | rtrimstr(".")' "$WORK/pr-antwort.json" 2>/dev/null || true)
+      hinweis=""
+      case "$grund" in *"not permitted to create"*)
+        hinweis=" In GitHub unter Settings → Actions → General »Allow GitHub Actions to create and approve pull requests« einschalten." ;;
+      esac
+      warn "Pull Request nicht angelegt: ${grund:-unbekannter Fehler}.$hinweis Branch: $branch"
+      report "$id" fehlgeschlagen "" "Änderung liegt im Branch $branch, aber der Pull Request ließ sich nicht anlegen: ${grund:-unbekannter Fehler}.$hinweis
+$zusammenfassung"
+      gruppe_ende; continue ;;
+  esac
   info "PR: $url"
   report "$id" pr_offen "$url" "$zusammenfassung"
   gruppe_ende
