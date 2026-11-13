@@ -210,10 +210,11 @@ dann nicht mehr. Wie beim Code-Scan bekommt Secupipe keinen Quellcode, nur Model
 # .github/workflows/secupipe-architektur.yml
 name: Secupipe Architektur-Review
 on:
-  pull_request:              # nur Änderungen gegenüber dem Zielbranch
-  schedule:
-    - cron: '41 3 1 * *'     # monatlich das ganze Repository
-  workflow_dispatch:
+  workflow_dispatch:         # von Hand: Actions → Run workflow
+  # optional automatisch:
+  # pull_request:            # nur Änderungen gegenüber dem Zielbranch
+  # schedule:
+  #   - cron: '41 3 1 * *'   # monatlich das ganze Repository
 permissions:
   contents: read
 jobs:
@@ -264,9 +265,16 @@ Pull Request. Gemergt wird nie automatisch.
 # .github/workflows/secupipe-architektur-fix.yml
 name: Secupipe Architektur-Fix
 on:
-  schedule:
-    - cron: '17 6-18/3 * * 1-5'   # werktags alle drei Stunden: angeforderte Fixes abholen
-  workflow_dispatch:
+  workflow_dispatch:              # von Hand: Actions → Run workflow
+    inputs:
+      ab:
+        description: zusätzlich Fixes für alle offenen Befunde ab diesem Schweregrad
+        type: choice
+        options: [hoch, kritisch, mittel, niedrig, nur angeforderte]
+        default: hoch
+  # optional automatisch, z. B. werktags alle drei Stunden:
+  # schedule:
+  #   - cron: '17 6-18/3 * * 1-5'
 permissions:
   contents: write
   pull-requests: write
@@ -282,7 +290,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          # AUTO: hoch              # optional: alle offenen Befunde ab hoch automatisch
+          AUTO: ${{ inputs.ab != 'nur angeforderte' && inputs.ab || '' }}
 ```
 
 | Variable | Bedeutung |
