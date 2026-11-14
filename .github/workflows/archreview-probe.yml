@@ -1,0 +1,45 @@
+# Probelauf des Architektur-Reviews an einem fremden, öffentlichen Repository.
+# Nur von Hand. Meldet nichts an Secupipe (DRY_RUN); der Bericht liegt als Artefakt am Lauf.
+# Braucht das Secret ANTHROPIC_API_KEY in diesem Repository.
+name: Architektur-Review Probe
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Öffentliches Repository, z. B. gotify/server
+        required: true
+        default: gotify/server
+      budget_usd:
+        description: KI-Budget je Agent in US-Dollar
+        required: true
+        default: '5'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container: ghcr.io/costa-chown/secupipe-autofix:1
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repository }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Architektur-Review (Probelauf)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          secupipe-archreview
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DRY_RUN: '1'
+          GESAMT: '0'
+          UMFANG: voll
+          REPO: ${{ inputs.repository }}
+          KI_BUDGET_USD: ${{ inputs.budget_usd }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: architektur-bericht
+          path: secupipe-architektur/
+          if-no-files-found: warn
